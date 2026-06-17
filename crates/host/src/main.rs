@@ -137,6 +137,41 @@ mod console {
             }
         }
     }
+
+    /// Read raw console input via `ReadFile`. With `ENABLE_VIRTUAL_TERMINAL_INPUT`
+    /// active this yields the VT byte stream (special keys as escape sequences),
+    /// unlike `std::io::stdin()` on Windows which goes through `ReadConsoleW` and
+    /// its line/UTF-16 handling — that path doesn't deliver raw keystrokes, which
+    /// is why hotkeys weren't intercepted.
+    pub fn read_console_input(buf: &mut [u8]) -> std::io::Result<usize> {
+        use windows_sys::Win32::Storage::FileSystem::ReadFile;
+        unsafe {
+            let h = GetStdHandle(STD_INPUT_HANDLE);
+            let mut read: u32 = 0;
+            let ok = ReadFile(
+                h,
+                buf.as_mut_ptr().cast(),
+                buf.len() as u32,
+                &mut read,
+                core::ptr::null_mut(),
+            );
+            if ok == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(read as usize)
+        }
+    }
+}
+
+/// Read a chunk of raw terminal input (bytes / VT sequences).
+#[cfg(windows)]
+fn read_stdin(buf: &mut [u8]) -> std::io::Result<usize> {
+    console::read_console_input(buf)
+}
+
+#[cfg(not(windows))]
+fn read_stdin(buf: &mut [u8]) -> std::io::Result<usize> {
+    std::io::stdin().lock().read(buf)
 }
 
 struct RawGuard {
@@ -280,12 +315,11 @@ async fn main() -> Result<()> {
     // stdin reader thread: hotkeys + forward keystrokes into the PTY.
     {
         std::thread::spawn(move || {
-            let mut stdin = std::io::stdin().lock();
             let mut buf = [0u8; 4096];
             let mut prefix_armed = false;
             let mut paused = false;
             loop {
-                let n = match stdin.read(&mut buf) {
+                let n = match read_stdin(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => n,
                 };
@@ -347,9 +381,11 @@ async fn main() -> Result<()> {
             // Hotkey actions.
             Some(ctl) = ctl_rx.recv() => match ctl {
                 Ctl::Privacy(p) => {
+                    // Viewers get a privacy overlay; we deliberately do NOT write to
+                    // the host's own screen here. The reader thread is the only writer
+                    // to local stdout, so the mirrored shell output is never corrupted
+                    // by an interleaved write mid-VT-sequence.
                     let _ = write.send(bin(&HostToRelay::Privacy { paused: p })).await;
-                    let note = if p { "● PRIVACY ON — viewers paused" } else { "○ privacy off — live" };
-                    write_stdout(&stdout_lock, format!("\x1b]0;share-terminal: {note}\x07").as_bytes());
                 }
                 Ctl::Quit => {
                     let _ = write.send(bin(&HostToRelay::Bye)).await;
@@ -359,9 +395,9 @@ async fn main() -> Result<()> {
             // Relay → host.
             msg = read.next() => match msg {
                 Some(Ok(Message::Binary(b))) => match decode::<RelayToHost>(&b[..]) {
-                    Ok(RelayToHost::Viewers(n)) => {
-                        write_stdout(&stdout_lock, format!("\x1b]0;share-terminal: {n} watching · {code}\x07").as_bytes());
-                    }
+                    // Viewer count changes are reflected on the watcher side; the host
+                    // keeps its screen free of overlay writes.
+                    Ok(RelayToHost::Viewers(_)) => {}
                     Ok(RelayToHost::Ping) => { let _ = write.send(bin(&HostToRelay::Pong)).await; }
                     Ok(RelayToHost::Error(_)) | Ok(RelayToHost::Welcome { .. }) => {}
                     Err(_) => {}
