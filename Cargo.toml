@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/protocol", "crates/host", "crates/relay", "crates/watch"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["jeanpierrev20"]
+repository = "https://github.com/jeanpierrev20/share-terminal"
+
+[profile.release]
+lto = "thin"
+strip = true
+opt-level = "z"
+codegen-units = 1

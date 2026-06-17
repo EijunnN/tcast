@@ -1,0 +1,11 @@
+# Use each platform's native stable toolchain.
+#
+# On Windows this resolves to the MSVC host (the supported path: the MSVC linker
+# handles Windows-API import libraries natively). Load the VS dev environment
+# first with `. .\tools\msvcenv.ps1`, which needs Visual Studio Build Tools +
+# the Windows SDK. On Linux/macOS (e.g. building the relay on a VPS) it resolves
+# to the native host with no extra setup. TLS uses native-tls (SChannel on
+# Windows), avoiding the C toolchain that rustls/aws-lc would pull in.
+[toolchain]
+channel = "stable"
+components = ["clippy", "rustfmt"]

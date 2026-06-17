@@ -1,0 +1,8 @@
+/target
+**/*.log
+/.toolchain
+Cargo.lock.bak
+
+# Machine-specific GNU-toolchain fallback (absolute dlltool path); not needed for
+# the supported MSVC/native builds.
+/.cargo/config.toml
