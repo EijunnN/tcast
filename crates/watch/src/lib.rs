@@ -87,6 +87,11 @@ struct App {
     playback: Option<audio::Playback>,
     /// Whether the viewer muted incoming voice.
     muted: bool,
+    /// Whether any voice frame has been received (even if playback failed).
+    audio_seen: bool,
+    /// If opening the speaker failed, the reason — surfaced in the footer so
+    /// audio isn't silently lost.
+    audio_err: Option<String>,
 }
 
 impl App {
@@ -256,6 +261,8 @@ pub async fn run(cfg: WatchConfig) -> Result<()> {
         chat_only: cfg.chat_only,
         playback: None,
         muted: false,
+        audio_seen: false,
+        audio_err: None,
     };
 
     let mut terminal = ratatui::init();
@@ -454,10 +461,15 @@ fn handle_net(app: &mut App, cmd_tx: &mpsc::UnboundedSender<WatchToRelay>, net: 
                 }
             }
             RelayToWatch::Audio(bytes) => {
+                app.audio_seen = true;
                 if !app.muted {
-                    // Lazily open the speaker on the first voice frame.
-                    if app.playback.is_none() {
-                        app.playback = audio::Playback::start().ok();
+                    // Lazily open the speaker on the first voice frame; surface a
+                    // failure instead of silently dropping the audio.
+                    if app.playback.is_none() && app.audio_err.is_none() {
+                        match audio::Playback::start() {
+                            Ok(pb) => app.playback = Some(pb),
+                            Err(e) => app.audio_err = Some(e.to_string()),
+                        }
                     }
                     if let Some(pb) = app.playback.as_mut() {
                         pb.push(&audio::decode_frame(&bytes));
@@ -665,8 +677,14 @@ fn ui_watch(f: &mut Frame, app: &mut App) {
         ])
     } else {
         let mut hint = String::from(" c chat · ");
-        if app.playback.is_some() || app.muted {
-            hint.push_str(if app.muted { "🔇 m unmute · " } else { "🔊 m mute · " });
+        if let Some(e) = &app.audio_err {
+            hint.push_str(&format!("🔇 audio: {e} · "));
+        } else if app.muted {
+            hint.push_str("🔇 m unmute · ");
+        } else if app.playback.is_some() {
+            hint.push_str("🔊 m mute · ");
+        } else if app.audio_seen {
+            hint.push_str("🔊 starting… · ");
         }
         hint.push_str("q/Esc back · Ctrl-C quit ");
         Line::from(vec![Span::styled(
