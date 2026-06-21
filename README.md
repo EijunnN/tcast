@@ -50,6 +50,8 @@ tcast watch <code>          # join a private stream directly by its code
 tcast list                  # print the public directory (add --json for scripts)
 tcast stream                # stream your terminal (private, code-only)
 tcast stream --public       # …and list it in the public directory
+tcast stream --chat         # …and let viewers send chat
+tcast chat                  # (while streaming) read viewer chat + reply
 ```
 
 Per-command relay override: `tcast --relay wss://other.example.com watch`, or set
@@ -58,13 +60,18 @@ saved config (`tcast config set-relay`) → built-in default → `ws://127.0.0.1
 
 **Host hotkeys** (prefix defaults to `Ctrl-]`; change it with `tcast stream --prefix <letter>`): `Ctrl-] p` privacy · `Ctrl-] q` quit · `Ctrl-] Ctrl-]` literal. Or just type `exit` / `Ctrl-D` in the shell to end the stream — handy when an inner app (Claude Code, nano…) uses your prefix key.
 **Watch keys:** `↑/↓` move · `Enter` watch · `r` refresh · `q`/`Esc` back/quit · `Ctrl-C` quit.
+While watching, press `c` to chat (if the host enabled it): type, `Enter` to send, `Esc` to cancel.
 
 ## Why it's safe to watch (and to stream)
 
-- **Read-only by construction.** The wire protocol has *no* message that carries a
-  spectator's keystrokes toward a host. A viewer literally cannot type into your
-  shell — it's a property of the types, not a runtime check.
-- **Privacy toggle.** Press `Ctrl-O p` in the host to pause what viewers see
+- **Read-only by construction.** No spectator input ever reaches your shell — there
+  is no path from any protocol message into the host's PTY, only your own local
+  keystrokes. A viewer literally cannot type into your shell; it's a property of the
+  types, not a runtime check.
+- **Chat is display-only & opt-in.** Viewer chat exists only if you pass `--chat`, is
+  sanitized by the relay (control/ANSI bytes stripped), and is never fed to a shell —
+  you read it in a separate `tcast chat` window.
+- **Privacy toggle.** Press `Ctrl-] p` in the host to pause what viewers see
   (e.g. while typing a password); press again to resume.
 - **Private by default.** A stream is reachable only by its generated code unless
   you pass `--public` to list it in the global directory.
@@ -128,8 +135,9 @@ cargo run -p tcast -- watch --relay ws://127.0.0.1:4455 <code>
 ```
 tcast [--relay URL] [--config PATH] [COMMAND]
   (no command)             open the watch browser
-  stream [--name NAME] [--shell SHELL] [--public] [--auth-key KEY] [--prefix LETTER]
-  watch  [CODE_OR_ID]
+  stream [--name NAME] [--shell SHELL] [--public] [--auth-key KEY] [--prefix LETTER] [--chat]
+  watch  [CODE_OR_ID] [--name NAME]
+  chat                     open chat for your own running stream (read + reply)
   list   [--json]
   config set-relay <URL> | set-auth-key <KEY> | set-name <NAME> | show [--path]
 ```
@@ -233,6 +241,8 @@ zero config), set the repository variable `TCAST_DEFAULT_RELAY` (e.g.
 - [x] Read-only CLI streaming over wss, public list + private codes, late-join snapshots,
       privacy toggle, live viewer counts, resize handling.
 - [x] Unified `tcast` client (stream/watch/list/config) + curl/PowerShell installers.
+- [x] Opt-in viewer chat (`--chat`, display-only, relay-sanitized, rate-limited) read via
+      `tcast chat`; configurable hotkey prefix; guard against watching your own stream.
 - [x] Robustness: watcher auto-reconnect with backoff (and auto-rejoin), frame-size limits,
       stream-count cap, constant-time auth-key check, private streams joinable only by code.
 - [ ] Known follow-ups: static **musl** Linux build for Alpine/old-glibc (needs vendored

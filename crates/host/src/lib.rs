@@ -46,6 +46,8 @@ pub struct StreamConfig {
     pub public: bool,
     /// Auth key, if the relay requires one.
     pub auth_key: Option<String>,
+    /// Accept viewer chat for this stream (`tcast stream --chat`).
+    pub chat: bool,
     /// Hotkey prefix byte (a Ctrl- control code). See [`DEFAULT_PREFIX`].
     pub prefix: u8,
 }
@@ -259,6 +261,7 @@ pub async fn run(cfg: StreamConfig) -> Result<()> {
             cols,
             rows,
             auth_key: cfg.auth_key.clone(),
+            chat: cfg.chat,
             version: PROTOCOL_VERSION.to_string(),
         })))
         .await

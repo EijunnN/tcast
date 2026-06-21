@@ -30,6 +30,12 @@ pub struct WatchConfig {
     pub relay: String,
     /// Join this code / stream id directly, skipping the browser.
     pub target: Option<String>,
+    /// Display name used to label this viewer's chat messages.
+    pub name: Option<String>,
+    /// Allow watching a stream owned by this machine (used by `tcast chat`).
+    pub allow_self: bool,
+    /// Open the chat pane immediately (used by `tcast chat`).
+    pub chat_open: bool,
 }
 
 /// Events from the network task to the UI.
@@ -63,6 +69,14 @@ struct App {
     /// stream_ids hosted by this same machine — filtered out of the browse list
     /// so you never end up watching your own stream.
     owned_ids: HashSet<String>,
+    /// Chat scrollback: (from, text, ts_unix), capped to the most recent lines.
+    chat_log: Vec<(String, String, u64)>,
+    /// Current chat compose buffer.
+    chat_input: String,
+    /// Whether keystrokes are captured into `chat_input` instead of UI commands.
+    composing: bool,
+    /// Whether the chat pane is shown.
+    chat_open: bool,
 }
 
 impl App {
@@ -108,6 +122,7 @@ pub async fn list(relay: String, json: bool) -> Result<()> {
     write
         .send(bin(&WatchToRelay::Hello(WatchHello {
             version: PROTOCOL_VERSION.to_string(),
+            name: None,
             cols: 0,
             rows: 0,
         })))
@@ -190,21 +205,26 @@ pub async fn list(relay: String, json: bool) -> Result<()> {
 /// Open the interactive spectator UI: browse public streams, or (if
 /// `cfg.target` is set) join that code/id directly.
 pub async fn run(cfg: WatchConfig) -> Result<()> {
-    // Same-machine guard: don't let the operator watch their own stream.
-    let owned = protocol::owned::list();
-    if let Some(t) = &cfg.target
-        && owned.iter().any(|(id, code)| id == t || code == t)
-    {
-        anyhow::bail!("that's your own stream — you can't watch yourself");
-    }
-    let owned_ids: HashSet<String> = owned.into_iter().map(|(id, _)| id).collect();
+    // Same-machine guard: don't let the operator watch their own stream — unless
+    // this is `tcast chat`, which deliberately joins your own stream.
+    let owned_ids: HashSet<String> = if cfg.allow_self {
+        HashSet::new()
+    } else {
+        let owned = protocol::owned::list();
+        if let Some(t) = &cfg.target
+            && owned.iter().any(|(id, code)| id == t || code == t)
+        {
+            anyhow::bail!("that's your own stream — you can't watch yourself");
+        }
+        owned.into_iter().map(|(id, _)| id).collect()
+    };
 
     let url = format!("{}/watch", cfg.relay.trim_end_matches('/'));
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<WatchToRelay>();
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<Net>();
 
-    tokio::spawn(net_task(url, cmd_rx, ui_tx));
+    tokio::spawn(net_task(url, cfg.name.clone(), cmd_rx, ui_tx));
 
     let mut app = App {
         relay: cfg.relay.clone(),
@@ -219,6 +239,10 @@ pub async fn run(cfg: WatchConfig) -> Result<()> {
         pending_target: cfg.target.clone(),
         last_target: None,
         owned_ids,
+        chat_log: Vec::new(),
+        chat_input: String::new(),
+        composing: false,
+        chat_open: cfg.chat_open,
     };
 
     let mut terminal = ratatui::init();
@@ -297,19 +321,47 @@ fn handle_key(
             }
             _ => {}
         },
-        Screen::Watching => match code {
-            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Backspace => {
-                let _ = cmd_tx.send(WatchToRelay::Leave);
-                let _ = cmd_tx.send(WatchToRelay::List);
-                app.screen = Screen::Browsing;
-                app.parser = None;
-                app.joined = None;
-                app.paused = false;
-                app.last_target = None; // deliberate leave: don't auto-rejoin
-                app.status = "browsing".into();
+        Screen::Watching => {
+            if app.composing {
+                // Keystrokes go to the chat input, not UI commands.
+                match code {
+                    KeyCode::Esc => {
+                        app.composing = false;
+                        app.chat_input.clear();
+                    }
+                    KeyCode::Enter => {
+                        let text = app.chat_input.trim().to_string();
+                        if !text.is_empty() {
+                            let _ = cmd_tx.send(WatchToRelay::Chat { text });
+                        }
+                        app.chat_input.clear();
+                    }
+                    KeyCode::Backspace => {
+                        app.chat_input.pop();
+                    }
+                    KeyCode::Char(c) => app.chat_input.push(c),
+                    _ => {}
+                }
+            } else {
+                match code {
+                    KeyCode::Char('c') => {
+                        app.chat_open = true;
+                        app.composing = true;
+                    }
+                    KeyCode::Char('q') | KeyCode::Esc | KeyCode::Backspace => {
+                        let _ = cmd_tx.send(WatchToRelay::Leave);
+                        let _ = cmd_tx.send(WatchToRelay::List);
+                        app.screen = Screen::Browsing;
+                        app.parser = None;
+                        app.joined = None;
+                        app.paused = false;
+                        app.last_target = None; // deliberate leave: don't auto-rejoin
+                        app.status = "browsing".into();
+                    }
+                    _ => {}
+                }
             }
-            _ => {}
-        },
+        }
     }
     false
 }
@@ -396,6 +448,14 @@ fn handle_net(app: &mut App, cmd_tx: &mpsc::UnboundedSender<WatchToRelay>, net: 
                 if let Some(info) = app.joined.as_mut() {
                     info.viewers = n;
                 }
+            }
+            RelayToWatch::Chat { from, text, ts_unix } => {
+                app.chat_log.push((from, text, ts_unix));
+                let overflow = app.chat_log.len().saturating_sub(200);
+                if overflow > 0 {
+                    app.chat_log.drain(0..overflow);
+                }
+                app.chat_open = true; // surface chat even if the pane was closed
             }
             RelayToWatch::Ended => {
                 app.screen = Screen::Browsing;
@@ -522,12 +582,20 @@ fn ui_watch(f: &mut Frame, app: &mut App) {
     };
     f.render_widget(Paragraph::new(title), chunks[0]);
 
+    // Body: the read-only terminal, plus an optional chat pane on the right.
+    let (term_area, chat_area) = if app.chat_open {
+        let cols = Layout::horizontal([Constraint::Min(20), Constraint::Length(32)]).split(chunks[1]);
+        (cols[0], Some(cols[1]))
+    } else {
+        (chunks[1], None)
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" read-only ")
         .border_style(Style::new().fg(Color::DarkGray));
-    let inner = block.inner(chunks[1]);
-    f.render_widget(block, chunks[1]);
+    let inner = block.inner(term_area);
+    f.render_widget(block, term_area);
 
     if let Some(parser) = app.parser.as_ref() {
         let pseudo = tui_term::widget::PseudoTerminal::new(parser.screen());
@@ -536,8 +604,30 @@ fn ui_watch(f: &mut Frame, app: &mut App) {
         f.render_widget(Paragraph::new("waiting for output…"), inner);
     }
 
+    if let Some(chat_area) = chat_area {
+        let cblock = Block::default()
+            .borders(Borders::ALL)
+            .title(" chat ")
+            .border_style(Style::new().fg(Color::Cyan));
+        let cinner = cblock.inner(chat_area);
+        f.render_widget(cblock, chat_area);
+        // Show the most recent messages that fit (newest at the bottom).
+        let h = cinner.height as usize;
+        let start = app.chat_log.len().saturating_sub(h.max(1));
+        let lines: Vec<Line> = app.chat_log[start..]
+            .iter()
+            .map(|(from, text, _)| {
+                Line::from(vec![
+                    Span::styled(format!("{from}: "), Style::new().fg(Color::Cyan).bold()),
+                    Span::raw(text.clone()),
+                ])
+            })
+            .collect();
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), cinner);
+    }
+
     if app.paused {
-        let overlay = centered_rect(60, 20, chunks[1]);
+        let overlay = centered_rect(60, 20, term_area);
         f.render_widget(Clear, overlay);
         let p = Paragraph::new("🙈  PRIVACY\n\nThe host paused the stream.")
             .alignment(Alignment::Center)
@@ -549,10 +639,18 @@ fn ui_watch(f: &mut Frame, app: &mut App) {
         f.render_widget(p, overlay);
     }
 
-    let footer = Line::from(vec![Span::styled(
-        " q/Esc back to list · Ctrl-C quit ",
-        Style::new().fg(Color::Black).bg(Color::DarkGray),
-    )]);
+    let footer = if app.composing {
+        Line::from(vec![
+            Span::styled(" chat> ", Style::new().fg(Color::Black).bg(Color::Cyan)),
+            Span::raw(format!("{}\u{2588}", app.chat_input)),
+            Span::styled("  (Enter send · Esc cancel)", Style::new().fg(Color::DarkGray)),
+        ])
+    } else {
+        Line::from(vec![Span::styled(
+            " c chat · q/Esc back · Ctrl-C quit ",
+            Style::new().fg(Color::Black).bg(Color::DarkGray),
+        )])
+    };
     f.render_widget(Paragraph::new(footer), chunks[2]);
 }
 
@@ -594,12 +692,13 @@ enum SessionEnd {
 
 async fn net_task(
     url: String,
+    name: Option<String>,
     mut cmd_rx: mpsc::UnboundedReceiver<WatchToRelay>,
     ui_tx: mpsc::UnboundedSender<Net>,
 ) {
     let mut backoff = 1u64;
     loop {
-        match connect_once(&url, &mut cmd_rx, &ui_tx).await {
+        match connect_once(&url, &name, &mut cmd_rx, &ui_tx).await {
             SessionEnd::Shutdown => return,
             SessionEnd::Lost { was_connected } => {
                 if was_connected {
@@ -617,6 +716,7 @@ async fn net_task(
 /// so queued commands survive across reconnects.
 async fn connect_once(
     url: &str,
+    name: &Option<String>,
     cmd_rx: &mut mpsc::UnboundedReceiver<WatchToRelay>,
     ui_tx: &mpsc::UnboundedSender<Net>,
 ) -> SessionEnd {
@@ -631,6 +731,7 @@ async fn connect_once(
 
     let hello = WatchToRelay::Hello(WatchHello {
         version: PROTOCOL_VERSION.to_string(),
+        name: name.clone(),
         cols: 0,
         rows: 0,
     });

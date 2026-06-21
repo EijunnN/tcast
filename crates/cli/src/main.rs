@@ -39,6 +39,8 @@ enum Command {
     Stream(StreamArgs),
     /// Watch a stream: opens the browser TUI, or joins a code/id directly.
     Watch(WatchArgs),
+    /// Open chat for your own running stream (read viewer messages + reply).
+    Chat,
     /// Print the live public stream directory and exit (non-interactive).
     List {
         /// Emit JSON instead of a table.
@@ -69,12 +71,18 @@ struct StreamArgs {
     /// Hotkey prefix key — a letter mapped to its Ctrl- code (default: Ctrl-]).
     #[arg(long)]
     prefix: Option<char>,
+    /// Accept viewer chat on this stream (view it with `tcast chat`).
+    #[arg(long)]
+    chat: bool,
 }
 
 #[derive(Args)]
 struct WatchArgs {
     /// Join this code / stream id directly, skipping the browser.
     target: Option<String>,
+    /// Display name for your chat messages (default: saved config name).
+    #[arg(long)]
+    name: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -109,6 +117,9 @@ async fn main() -> Result<()> {
             watch::run(watch::WatchConfig {
                 relay,
                 target: None,
+                name: cfg.name.clone(),
+                allow_self: false,
+                chat_open: false,
             })
             .await
         }
@@ -117,6 +128,29 @@ async fn main() -> Result<()> {
             watch::run(watch::WatchConfig {
                 relay,
                 target: a.target,
+                name: a.name.or_else(|| cfg.name.clone()),
+                allow_self: false,
+                chat_open: false,
+            })
+            .await
+        }
+        Some(Command::Chat) => {
+            let relay = config::resolve_relay(cli.relay, &cfg);
+            let target = protocol::owned::list()
+                .into_iter()
+                .next()
+                .map(|(_, code)| code)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no local stream is running here — start one with `tcast stream --chat`"
+                    )
+                })?;
+            watch::run(watch::WatchConfig {
+                relay,
+                target: Some(target),
+                name: cfg.name.clone(),
+                allow_self: true,
+                chat_open: true,
             })
             .await
         }
@@ -137,6 +171,7 @@ async fn main() -> Result<()> {
                 shell: a.shell,
                 public: a.public,
                 auth_key: a.auth_key.or_else(|| cfg.auth_key.clone()),
+                chat: a.chat,
                 prefix,
             })
             .await

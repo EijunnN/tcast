@@ -2180,6 +2180,7 @@ dependencies = [
  "clap",
  "dirs",
  "host",
+ "protocol",
  "serde",
  "tokio",
  "toml",

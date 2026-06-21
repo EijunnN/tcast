@@ -65,6 +65,7 @@ enum Bcast {
     Resize { cols: u16, rows: u16 },
     Privacy(bool),
     Viewers(u32),
+    Chat { from: String, text: String, ts: u64 },
     Ended,
 }
 
@@ -79,6 +80,8 @@ struct Stream {
     paused: AtomicBool,
     /// Outbound channel to the host task (viewer-count updates, etc.).
     host_tx: mpsc::UnboundedSender<RelayToHost>,
+    /// Whether the host opted into viewer chat (`tcast stream --chat`).
+    chat_enabled: bool,
 }
 
 struct Registry {
@@ -160,6 +163,40 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Clean an untrusted chat message: replace control bytes (incl. the ESC that
+/// introduces ANSI sequences) with spaces, collapse whitespace, trim, and cap
+/// length. Returns `None` when nothing printable remains, so chat can never
+/// inject VT codes into a host's mirror or another viewer's TUI.
+fn sanitize_chat(text: &str) -> Option<String> {
+    let spaced: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let collapsed = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    let capped: String = collapsed.chars().take(256).collect();
+    let trimmed = capped.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Clean an untrusted display name for chat labels. Falls back to "anon".
+fn sanitize_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(24)
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        "anon".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn make_code(name: &str) -> String {
@@ -296,6 +333,7 @@ async fn handle_host(socket: WebSocket, reg: Arc<Registry>) {
         parser: Mutex::new(parser),
         paused: AtomicBool::new(false),
         host_tx: htx,
+        chat_enabled: hello.chat,
     });
 
     reg.streams
@@ -385,8 +423,8 @@ async fn handle_host(socket: WebSocket, reg: Arc<Registry>) {
 async fn handle_watch(socket: WebSocket, reg: Arc<Registry>) {
     let (mut sender, mut receiver) = socket.split();
 
-    // First frame must be Hello.
-    match receiver.next().await {
+    // First frame must be Hello; capture the (sanitized) chat display name.
+    let name = match receiver.next().await {
         Some(Ok(Message::Binary(b))) => match decode::<WatchToRelay>(&b[..]) {
             Ok(WatchToRelay::Hello(h)) => {
                 if h.version != PROTOCOL_VERSION {
@@ -398,6 +436,7 @@ async fn handle_watch(socket: WebSocket, reg: Arc<Registry>) {
                         .await;
                     return;
                 }
+                sanitize_name(h.name.as_deref().unwrap_or("anon"))
             }
             _ => {
                 let _ = sender
@@ -407,13 +446,15 @@ async fn handle_watch(socket: WebSocket, reg: Arc<Registry>) {
             }
         },
         _ => return,
-    }
+    };
     if sender.send(bin(&RelayToWatch::Welcome)).await.is_err() {
         return;
     }
 
     let mut joined: Option<Arc<Stream>> = None;
     let mut rx: Option<broadcast::Receiver<Bcast>> = None;
+    // Coarse chat rate-limit: at most 5 messages per rolling 10s per connection.
+    let mut chat_times: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
 
     loop {
         tokio::select! {
@@ -471,6 +512,37 @@ async fn handle_watch(socket: WebSocket, reg: Arc<Registry>) {
                                 rx = None;
                             }
                         }
+                        Ok(WatchToRelay::Chat { text }) => {
+                            match &joined {
+                                Some(s) if s.chat_enabled => {
+                                    if let Some(clean) = sanitize_chat(&text) {
+                                        let now = now_unix();
+                                        while chat_times
+                                            .front()
+                                            .is_some_and(|t| now.saturating_sub(*t) >= 10)
+                                        {
+                                            chat_times.pop_front();
+                                        }
+                                        if chat_times.len() < 5 {
+                                            chat_times.push_back(now);
+                                            let _ = s.tx.send(Bcast::Chat {
+                                                from: name.clone(),
+                                                text: clean,
+                                                ts: now,
+                                            });
+                                        }
+                                    }
+                                }
+                                Some(_) => {
+                                    let _ = sender
+                                        .send(bin(&RelayToWatch::Error(
+                                            "chat is disabled for this stream".into(),
+                                        )))
+                                        .await;
+                                }
+                                None => {}
+                            }
+                        }
                         Ok(WatchToRelay::Pong) => {}
                         Ok(WatchToRelay::Hello(_)) => {}
                         Err(e) => warn!("bad watch frame: {e}"),
@@ -500,6 +572,15 @@ async fn handle_watch(socket: WebSocket, reg: Arc<Registry>) {
                     }
                     Ok(Bcast::Viewers(n)) => {
                         if sender.send(bin(&RelayToWatch::Viewers(n))).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Bcast::Chat { from, text, ts }) => {
+                        if sender
+                            .send(bin(&RelayToWatch::Chat { from, text, ts_unix: ts }))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }

@@ -9,11 +9,14 @@
 //!
 //! ## Read-only invariant
 //!
-//! By design there is **no** message variant that carries keystrokes from a
-//! watcher towards a host. A spectator physically cannot type into a streamer's
-//! shell: [`WatchToRelay`] only lets a viewer list, join and leave. This makes
-//! the "spectators are read-only" guarantee a property of the type system, not
-//! of runtime checks.
+//! No watcher input is ever delivered to the host's PTY/shell. The shell stays
+//! strictly read-only by construction: there is no path from any protocol
+//! message into the host's PTY writer — the host forwards only its own local
+//! keystrokes. Watchers can list, join, leave and (when the host opts in with
+//! `--chat`) send display-only [`Chat`] text, which the host and other viewers
+//! render as inert UI and never feed to a shell.
+//!
+//! [`Chat`]: WatchToRelay::Chat
 //!
 //! ## Lifecycle
 //!
@@ -38,7 +41,7 @@ use serde::{Deserialize, Serialize};
 /// Protocol version. Bumped on any breaking change to the message shapes below.
 /// The host sends it in [`HostHello::version`] and a watcher in [`WatchHello`]
 /// so the relay can reject incompatible peers cleanly instead of mis-decoding.
-pub const PROTOCOL_VERSION: &str = "0.1";
+pub const PROTOCOL_VERSION: &str = "0.2";
 
 /// Default relay listen / connect port.
 pub const DEFAULT_PORT: u16 = 4455;
@@ -98,14 +101,18 @@ pub struct HostHello {
     /// Optional operator gate. If the relay was started with `--auth-key`, the
     /// host must present the matching key here or it is rejected.
     pub auth_key: Option<String>,
+    /// Whether this host accepts viewer chat (`tcast stream --chat`). When
+    /// `false` the relay rejects chat messages for this stream.
+    pub chat: bool,
     /// [`PROTOCOL_VERSION`] of the host build.
     pub version: String,
 }
 
 // ──────────────────────────── Watch ⇄ Relay ─────────────────────────────
 
-/// Messages a **watcher** sends to the relay. Note: nothing here can reach a
-/// host's PTY — see the read-only invariant in the module docs.
+/// Messages a **watcher** sends to the relay. Nothing here can reach a host's
+/// PTY/shell — see the read-only invariant in the module docs. `Chat` carries
+/// display-only text, never keystrokes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WatchToRelay {
     /// First frame after connecting.
@@ -119,6 +126,9 @@ pub enum WatchToRelay {
     Join { target: String },
     /// Stop watching the current stream and return to browsing.
     Leave,
+    /// Send a chat message to the joined stream. Display-only text that never
+    /// reaches any shell; requires the host to have enabled chat (`--chat`).
+    Chat { text: String },
     /// Application-level keepalive; reply to [`RelayToWatch::Ping`].
     Pong,
 }
@@ -149,6 +159,13 @@ pub enum RelayToWatch {
     Privacy { paused: bool },
     /// Viewer count of the joined stream changed.
     Viewers(u32),
+    /// A chat message from a viewer of the joined stream (sanitized,
+    /// display-only). Fanned out to everyone watching, including the sender.
+    Chat {
+        from: String,
+        text: String,
+        ts_unix: u64,
+    },
     /// The joined stream ended (host disconnected or sent `Bye`).
     Ended,
     /// A request failed (unknown code, version skew, etc.).
@@ -162,6 +179,9 @@ pub enum RelayToWatch {
 pub struct WatchHello {
     /// [`PROTOCOL_VERSION`] of the watcher build.
     pub version: String,
+    /// Optional display name used to label this viewer's chat messages. The
+    /// relay treats it as untrusted (sanitized/truncated); `None` → "anon".
+    pub name: Option<String>,
     /// Viewer's render area, in case the relay wants it for analytics. The
     /// viewer always renders the host's screen scaled/clipped to its own size,
     /// so this is advisory only.
@@ -288,6 +308,7 @@ mod tests {
             cols: 120,
             rows: 40,
             auth_key: Some("secret".into()),
+            chat: true,
             version: PROTOCOL_VERSION.into(),
         });
         let bytes = encode(&msg);
@@ -306,5 +327,22 @@ mod tests {
             WatchToRelay::Join { target } => assert_eq!(target, "jean-9F3X"),
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn chat_messages_round_trip() {
+        let up = WatchToRelay::Chat {
+            text: "hello host".into(),
+        };
+        let back: WatchToRelay = decode(&encode(&up)).unwrap();
+        assert!(matches!(back, WatchToRelay::Chat { text } if text == "hello host"));
+
+        let down = RelayToWatch::Chat {
+            from: "viewer".into(),
+            text: "hi".into(),
+            ts_unix: 42,
+        };
+        let back: RelayToWatch = decode(&encode(&down)).unwrap();
+        assert!(matches!(back, RelayToWatch::Chat { ts_unix, .. } if ts_unix == 42));
     }
 }
