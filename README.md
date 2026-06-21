@@ -24,7 +24,7 @@ There are two programs:
 Prebuilt binaries, no Rust toolchain needed:
 
 ```sh
-# Linux / macOS
+# Linux
 curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/EijunnN/tcast/main/install.sh | sh
 ```
 ```powershell
@@ -42,7 +42,7 @@ tcast config set-relay wss://relay.example.com
 > `cargo install --git https://github.com/EijunnN/tcast tcast`
 
 **Updating:** once installed, run `tcast upgrade` to replace your binary in place
-with the latest release (works on Linux, macOS and Windows).
+with the latest release (Linux and Windows; on macOS, build from source).
 
 ## Use it
 
@@ -241,9 +241,10 @@ tcast stream --public --auth-key change-me        # stream (if a key is set)
 ## Releases
 
 Tagging a commit `vX.Y.Z` triggers [`.github/workflows/release.yml`](.github/workflows/release.yml),
-which builds `tcast` for Linux (x86_64/aarch64, glibc), macOS (Intel/Apple Silicon)
-and Windows (x86_64), and uploads the archives + sha256 checksums to a GitHub
-Release. The `install.sh` / `install.ps1` one-liners above download from there.
+which builds `tcast` for Linux (x86_64/aarch64, glibc) and Windows (x86_64), and
+uploads the archives + sha256 checksums to a GitHub Release. The `install.sh` /
+`install.ps1` one-liners above download from there. (macOS isn't prebuilt — build
+it from source with `cargo build --release`.)
 
 To bake a default relay into the released binaries (so a fresh `tcast` works with
 zero config), set the repository variable `TCAST_DEFAULT_RELAY` (e.g.
