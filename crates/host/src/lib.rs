@@ -220,6 +220,17 @@ fn write_stdout(lock: &Mutex<()>, bytes: &[u8]) {
     let _ = out.flush();
 }
 
+/// Reflect the push-to-talk state in the terminal title bar, plus an optional
+/// desktop notification (OSC 9) on change. These OSC sequences are interpreted
+/// by the terminal and never drawn, so they can't corrupt the mirrored shell.
+fn write_status(lock: &Mutex<()>, title: &str, notify: Option<&str>) {
+    let mut seq = format!("\x1b]0;{title}\x07");
+    if let Some(n) = notify {
+        seq.push_str(&format!("\x1b]9;{n}\x07"));
+    }
+    write_stdout(lock, seq.as_bytes());
+}
+
 // ──────────────────────────────── run ────────────────────────────────────
 
 /// Clears this machine's "owned stream" marker (see [`protocol::owned`]) when the
@@ -433,6 +444,7 @@ pub async fn run(cfg: StreamConfig) -> Result<()> {
     // ── Async core ──────────────────────────────────────────────────────
     let mut resize_tick = tokio::time::interval(std::time::Duration::from_millis(400));
     let mut last_size = (cols, rows);
+    let mut last_talking = false;
 
     loop {
         tokio::select! {
@@ -485,6 +497,21 @@ pub async fn run(cfg: StreamConfig) -> Result<()> {
                         let _ = master.resize(PtySize { rows: r, cols: c, pixel_width: 0, pixel_height: 0 });
                         let _ = write.send(bin(&HostToRelay::Resize { cols: c, rows: r })).await;
                     }
+                // Show push-to-talk state in the title bar (voice streams only).
+                if let Some(p) = &ptt {
+                    let talking = p.load(Ordering::Relaxed);
+                    if talking != last_talking {
+                        last_talking = talking;
+                        if talking {
+                            write_status(&stdout_lock, "🎙 ON · tcast", Some("tcast — mic ON"));
+                        } else {
+                            write_status(&stdout_lock, "tcast", Some("tcast — mic off"));
+                        }
+                    } else if talking {
+                        // Re-assert (the shell may reset the title at each prompt).
+                        write_status(&stdout_lock, "🎙 ON · tcast", None);
+                    }
+                }
             }
             // Shell exited: flush any output still queued from the reader thread
             // so viewers see the final screen, then say goodbye.

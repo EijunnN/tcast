@@ -66,9 +66,17 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $cwd = (Get-Location).Path
           $asset = "tcast-${{ matrix.target }}.zip"
-          # Binary at the zip root (see the Unix step for why).
-          Compress-Archive -Path "target/${{ matrix.target }}/release/tcast.exe" -DestinationPath $asset -Force
+          $assetPath = Join-Path $cwd $asset
+          $srcPath = Join-Path $cwd "target/${{ matrix.target }}/release/tcast.exe"
+          # STORED (no compression) so even older `tcast upgrade` clients — whose
+          # bundled zip reader lacks deflate — can extract it. Binary at the root.
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          if (Test-Path $assetPath) { Remove-Item $assetPath }
+          $zip = [System.IO.Compression.ZipFile]::Open($assetPath, 'Create')
+          [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $srcPath, "tcast.exe", [System.IO.Compression.CompressionLevel]::NoCompression) | Out-Null
+          $zip.Dispose()
           $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
           "$hash  $asset" | Out-File -Encoding ascii "$asset.sha256"
           "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
