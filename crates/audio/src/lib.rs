@@ -137,9 +137,14 @@ fn build_input(tx: UnboundedSender<Vec<i16>>, enabled: Arc<AtomicBool>) -> Resul
     let channels = config.channels.max(1) as usize;
 
     match sample_format {
-        SampleFormat::F32 => input_stream::<f32>(&device, &config, channels, tx, enabled),
+        SampleFormat::I8 => input_stream::<i8>(&device, &config, channels, tx, enabled),
         SampleFormat::I16 => input_stream::<i16>(&device, &config, channels, tx, enabled),
+        SampleFormat::I32 => input_stream::<i32>(&device, &config, channels, tx, enabled),
+        SampleFormat::U8 => input_stream::<u8>(&device, &config, channels, tx, enabled),
         SampleFormat::U16 => input_stream::<u16>(&device, &config, channels, tx, enabled),
+        SampleFormat::U32 => input_stream::<u32>(&device, &config, channels, tx, enabled),
+        SampleFormat::F32 => input_stream::<f32>(&device, &config, channels, tx, enabled),
+        SampleFormat::F64 => input_stream::<f64>(&device, &config, channels, tx, enabled),
         other => Err(anyhow!("unsupported input sample format: {other:?}")),
     }
 }
@@ -248,9 +253,14 @@ fn build_output(cons: ringbuf::HeapCons<i16>) -> Result<cpal::Stream> {
     let channels = config.channels.max(1) as usize;
 
     match sample_format {
-        SampleFormat::F32 => output_stream::<f32>(&device, &config, channels, cons),
+        SampleFormat::I8 => output_stream::<i8>(&device, &config, channels, cons),
         SampleFormat::I16 => output_stream::<i16>(&device, &config, channels, cons),
+        SampleFormat::I32 => output_stream::<i32>(&device, &config, channels, cons),
+        SampleFormat::U8 => output_stream::<u8>(&device, &config, channels, cons),
         SampleFormat::U16 => output_stream::<u16>(&device, &config, channels, cons),
+        SampleFormat::U32 => output_stream::<u32>(&device, &config, channels, cons),
+        SampleFormat::F32 => output_stream::<f32>(&device, &config, channels, cons),
+        SampleFormat::F64 => output_stream::<f64>(&device, &config, channels, cons),
         other => Err(anyhow!("unsupported output sample format: {other:?}")),
     }
 }

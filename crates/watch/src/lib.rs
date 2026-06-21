@@ -36,6 +36,9 @@ pub struct WatchConfig {
     pub allow_self: bool,
     /// Open the chat pane immediately (used by `tcast chat`).
     pub chat_open: bool,
+    /// Show only the chat (no terminal mirror) — used by `tcast chat` so the host
+    /// gets a pure chat window instead of their own mirrored screen.
+    pub chat_only: bool,
 }
 
 /// Events from the network task to the UI.
@@ -77,6 +80,8 @@ struct App {
     composing: bool,
     /// Whether the chat pane is shown.
     chat_open: bool,
+    /// Render only the chat (no terminal) — the `tcast chat` host window.
+    chat_only: bool,
     /// Lazily-started speaker playback for host voice (None until the first
     /// frame arrives, or while muted).
     playback: Option<audio::Playback>,
@@ -248,6 +253,7 @@ pub async fn run(cfg: WatchConfig) -> Result<()> {
         chat_input: String::new(),
         composing: false,
         chat_open: cfg.chat_open,
+        chat_only: cfg.chat_only,
         playback: None,
         muted: false,
     };
@@ -606,61 +612,49 @@ fn ui_watch(f: &mut Frame, app: &mut App) {
     };
     f.render_widget(Paragraph::new(title), chunks[0]);
 
-    // Body: the read-only terminal, plus an optional chat pane on the right.
-    let (term_area, chat_area) = if app.chat_open {
-        let cols = Layout::horizontal([Constraint::Min(20), Constraint::Length(32)]).split(chunks[1]);
-        (cols[0], Some(cols[1]))
+    if app.chat_only {
+        // Pure chat window (the `tcast chat` host view): no terminal mirror.
+        render_chat(f, chunks[1], app);
     } else {
-        (chunks[1], None)
-    };
+        // Body: the read-only terminal, plus an optional chat pane on the right.
+        let (term_area, chat_area) = if app.chat_open {
+            let cols =
+                Layout::horizontal([Constraint::Min(20), Constraint::Length(34)]).split(chunks[1]);
+            (cols[0], Some(cols[1]))
+        } else {
+            (chunks[1], None)
+        };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" read-only ")
-        .border_style(Style::new().fg(Color::DarkGray));
-    let inner = block.inner(term_area);
-    f.render_widget(block, term_area);
-
-    if let Some(parser) = app.parser.as_ref() {
-        let pseudo = tui_term::widget::PseudoTerminal::new(parser.screen());
-        f.render_widget(pseudo, inner);
-    } else {
-        f.render_widget(Paragraph::new("waiting for output…"), inner);
-    }
-
-    if let Some(chat_area) = chat_area {
-        let cblock = Block::default()
+        let block = Block::default()
             .borders(Borders::ALL)
-            .title(" chat ")
-            .border_style(Style::new().fg(Color::Cyan));
-        let cinner = cblock.inner(chat_area);
-        f.render_widget(cblock, chat_area);
-        // Show the most recent messages that fit (newest at the bottom).
-        let h = cinner.height as usize;
-        let start = app.chat_log.len().saturating_sub(h.max(1));
-        let lines: Vec<Line> = app.chat_log[start..]
-            .iter()
-            .map(|(from, text, _)| {
-                Line::from(vec![
-                    Span::styled(format!("{from}: "), Style::new().fg(Color::Cyan).bold()),
-                    Span::raw(text.clone()),
-                ])
-            })
-            .collect();
-        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), cinner);
-    }
+            .title(" read-only ")
+            .border_style(Style::new().fg(Color::DarkGray));
+        let inner = block.inner(term_area);
+        f.render_widget(block, term_area);
 
-    if app.paused {
-        let overlay = centered_rect(60, 20, term_area);
-        f.render_widget(Clear, overlay);
-        let p = Paragraph::new("🙈  PRIVACY\n\nThe host paused the stream.")
-            .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::new().fg(Color::Magenta)),
-            );
-        f.render_widget(p, overlay);
+        if let Some(parser) = app.parser.as_ref() {
+            let pseudo = tui_term::widget::PseudoTerminal::new(parser.screen());
+            f.render_widget(pseudo, inner);
+        } else {
+            f.render_widget(Paragraph::new("waiting for output…"), inner);
+        }
+
+        if let Some(chat_area) = chat_area {
+            render_chat(f, chat_area, app);
+        }
+
+        if app.paused {
+            let overlay = centered_rect(60, 20, term_area);
+            f.render_widget(Clear, overlay);
+            let p = Paragraph::new("🙈  PRIVACY\n\nThe host paused the stream.")
+                .alignment(Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::new().fg(Color::Magenta)),
+                );
+            f.render_widget(p, overlay);
+        }
     }
 
     let footer = if app.composing {
@@ -681,6 +675,56 @@ fn ui_watch(f: &mut Frame, app: &mut App) {
         )])
     };
     f.render_widget(Paragraph::new(footer), chunks[2]);
+}
+
+/// Render the chat scrollback into `area`, wrapping each message and keeping the
+/// newest lines visible at the bottom (overflow clips the oldest, not the newest).
+fn render_chat(f: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" chat ")
+        .border_style(Style::new().fg(Color::Cyan));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let width = inner.width.max(1) as usize;
+    let h = inner.height.max(1) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    for (from, text, _) in &app.chat_log {
+        wrap_chat_message(from, text, width, &mut lines);
+    }
+    let start = lines.len().saturating_sub(h);
+    f.render_widget(Paragraph::new(lines[start..].to_vec()), inner);
+}
+
+/// Char-wrap one chat message to `width`, styling the sender prefix on its first
+/// line. Appends the resulting display lines to `out`.
+fn wrap_chat_message(from: &str, text: &str, width: usize, out: &mut Vec<Line<'static>>) {
+    let prefix = format!("{from}: ");
+    let plen = prefix.chars().count();
+    let full: Vec<char> = format!("{prefix}{text}").chars().collect();
+    if full.is_empty() {
+        return;
+    }
+    let w = width.max(1);
+    let mut i = 0;
+    while i < full.len() {
+        let end = (i + w).min(full.len());
+        let seg: String = full[i..end].iter().collect();
+        if i == 0 {
+            let pc = plen.min(seg.chars().count());
+            let p: String = seg.chars().take(pc).collect();
+            let r: String = seg.chars().skip(pc).collect();
+            let mut spans = vec![Span::styled(p, Style::new().fg(Color::Cyan).bold())];
+            if !r.is_empty() {
+                spans.push(Span::raw(r));
+            }
+            out.push(Line::from(spans));
+        } else {
+            out.push(Line::from(seg));
+        }
+        i = end;
+    }
 }
 
 fn trunc(s: &str, max: usize) -> String {

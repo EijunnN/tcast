@@ -125,6 +125,7 @@ async fn main() -> Result<()> {
                 name: cfg.name.clone(),
                 allow_self: false,
                 chat_open: false,
+                chat_only: false,
             })
             .await
         }
@@ -136,6 +137,7 @@ async fn main() -> Result<()> {
                 name: a.name.or_else(|| cfg.name.clone()),
                 allow_self: false,
                 chat_open: false,
+                chat_only: false,
             })
             .await
         }
@@ -156,6 +158,7 @@ async fn main() -> Result<()> {
                 name: cfg.name.clone(),
                 allow_self: true,
                 chat_open: true,
+                chat_only: true,
             })
             .await
         }
